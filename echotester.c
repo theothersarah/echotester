@@ -52,16 +52,18 @@ enum arg_keys
 	KEY_ADDRESS = 'a',
 	KEY_DURATION = 'd',
 	KEY_LENGTH = 'l',
-	KEY_NUMBER = 'n',
+	KEY_PORT = 'p',
+	KEY_WORKERS = 'w'
 };
 
 // argp options vector
 static struct argp_option argp_options[] =
 {
-	{"address",		KEY_ADDRESS,	"STRING",		0,			"Address of echo server"},
-	{"duration",	KEY_DURATION,	"NUMBER",		0,			"Duration of test in seconds"},
-	{"length",		KEY_LENGTH,		"NUMBER",		0,			"Length of message in bytes"},
-	{"number",		KEY_NUMBER,		"NUMBER",		0,			"Number of worker processes"},
+	{"address",		KEY_ADDRESS,	"STRING",		0,			"Address of echo server (default 127.0.0.1)"},
+	{"duration",	KEY_DURATION,	"NUMBER",		0,			"Duration of test in seconds (default 60)"},
+	{"length",		KEY_LENGTH,		"NUMBER",		0,			"Length of message in bytes (default 32)"},
+	{"port",		KEY_PORT,		"NUMBER",		0,			"Network port to use (default 8080)"},
+	{"workers",		KEY_WORKERS,	"NUMBER",		0,			"Number of worker processes (default 1)"},
 	{0}
 };
 
@@ -71,7 +73,8 @@ struct arguments
 	char* address;
 	int duration;
 	int length;
-	int number;
+	unsigned short port;
+	int workers;
 };
 
 // Argp option parser
@@ -90,8 +93,11 @@ static error_t argp_parse_options(int key, char* arg, struct argp_state* state)
 	case KEY_LENGTH:
 		sscanf(arg, "%i", &args->length);
 		break;
-	case KEY_NUMBER:
-		sscanf(arg, "%i", &args->number);
+	case KEY_PORT:
+		sscanf(arg, "%hu", &args->port);
+		break;
+	case KEY_WORKERS:
+		sscanf(arg, "%i", &args->workers);
 		break;
 	default:
 		return ARGP_ERR_UNKNOWN;
@@ -108,6 +114,12 @@ static error_t argp_parse_options(int key, char* arg, struct argp_state* state)
 // *********************************************************************
 void* smalloc(size_t size)
 {
+	if (size == 0)
+	{
+		errno = EINVAL;
+		return NULL;
+	}
+	
 	size_t length = sizeof(size_t) + size;
 
 	size_t* ptr = (size_t*)mmap(NULL, length, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -125,11 +137,17 @@ void* smalloc(size_t size)
 
 void* scalloc(size_t nmemb, size_t size)
 {
+	if (nmemb == 0 || size == 0)
+	{
+		errno = EINVAL;
+		return NULL;
+	}
+	
 	size_t total = nmemb * size;
 	
 	if (total / nmemb != size)
 	{
-		errno = EINVAL;
+		errno = EOVERFLOW;
 		return NULL;
 	}
 	
@@ -191,7 +209,7 @@ void process(int id, struct arguments* args)
 	
 	if (txBuffer == NULL)
 	{
-		fprintf(stderr, "Error: Cannot alolocate transmit buffer for worker #%i: %s\n", id, strerror(errno));
+		fprintf(stderr, "Error: Cannot allocate transmit buffer for worker #%i: %s\n", id, strerror(errno));
 		exit(EXIT_FAILURE);
 	}
 	
@@ -203,7 +221,7 @@ void process(int id, struct arguments* args)
 	
 	if (rxBuffer == NULL)
 	{
-		fprintf(stderr, "Error: Cannot alolocate receive buffer for worker #%i: %s\n", id, strerror(errno));
+		fprintf(stderr, "Error: Cannot allocate receive buffer for worker #%i: %s\n", id, strerror(errno));
 		exit(EXIT_FAILURE);
 	}
 	
@@ -211,7 +229,7 @@ void process(int id, struct arguments* args)
 	struct sockaddr_in addr = 
 	{
 		.sin_family = AF_INET,
-		.sin_port = htons(8080),
+		.sin_port = htons(args->port),
 		.sin_addr =
 		{
 			.s_addr = htonl(INADDR_ANY)
@@ -225,12 +243,12 @@ void process(int id, struct arguments* args)
 	{
 		.it_interval =
 		{
-			.tv_sec = 60
+			.tv_sec = args->duration
 		},
 		
 		.it_value =
 		{
-			.tv_sec = 60
+			.tv_sec = args->duration
 		}
 	};
 	
@@ -246,7 +264,7 @@ void process(int id, struct arguments* args)
 	
 	if (retval < 0)
 	{
-		perror("timerfd_settime");
+		fprintf(stderr, "Error: Cannot set timerfd time for worker #%i: %s\n", id, strerror(errno));
 		exit(EXIT_FAILURE);
 	}
 	
@@ -296,6 +314,11 @@ void process(int id, struct arguments* args)
 			// If timerfd ticks, we're done
 			if (poll_list[0].revents & POLLIN)
 			{
+				close(sockfd);
+				
+				free(txBuffer);
+				free(rxBuffer);
+				
 				return;
 			}
 			
@@ -369,19 +392,21 @@ int main(int argc, char* argv[])
 	args.address = "127.0.0.1";
 	args.duration = 60;
 	args.length = 32;
-	args.number = 1;
+	args.port = 8080;
+	args.workers = 1;
 
 	// Parse arguments
 	argp_parse(&argp_parser, argc, argv, 0, 0, &args);
 
 	// Report argument values
-	printf("Address of echo server: %s\n", args.address);
+	printf("Address: %s\n", args.address);
+	printf("Port: %hu\n", args.port);
 	printf("Duration: %i seconds\n", args.duration);
-	printf("Length of message: %i bytes\n", args.length);
-	printf("Number of processes: %i\n", args.number);
+	printf("Length: %i bytes\n", args.length);
+	printf("Workers: %i\n", args.workers);
 	
 	// Allocate a table to store process information in
-	processTable = (struct process_entry*)calloc(args.number, sizeof(struct process_entry));
+	processTable = (struct process_entry*)calloc(args.workers, sizeof(struct process_entry));
 	
 	if (processTable == NULL)
 	{
@@ -390,7 +415,7 @@ int main(int argc, char* argv[])
 	}
 
 	// Allocate shared memory
-	shared = (long*)scalloc(args.number, sizeof(long));
+	shared = (long*)scalloc(args.workers, sizeof(long));
 	
 	if (shared == NULL)
 	{
@@ -403,7 +428,7 @@ int main(int argc, char* argv[])
 	pid_t pid;
 
 	// Spawn worker processes. For workers, the loop will break with id being the worker number.
-	for (id = 0; id < args.number; id++)
+	for (id = 0; id < args.workers; id++)
 	{
 		pid = fork();
 	
@@ -439,7 +464,7 @@ int main(int argc, char* argv[])
 		while (pid = wait(&status), pid > 0)
 		{
 			// Search process table to find out which worker had just exited
-			for (id = 0; id < args.number; id++)
+			for (id = 0; id < args.workers; id++)
 			{
 				if (processTable[id].pid == pid)
 				{
@@ -459,7 +484,7 @@ int main(int argc, char* argv[])
 		long result = 0;
 		int count = 0;
 		
-		for (id = 0; id < args.number; id++)
+		for (id = 0; id < args.workers; id++)
 		{
 			if (processTable[id].status == 0)
 			{
