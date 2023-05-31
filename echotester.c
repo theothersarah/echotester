@@ -334,7 +334,7 @@ void process(int id, struct arguments* args)
 			}
 			else if (retval == 0)
 			{
-				if (results[id].mismatchContents == 0)
+				if (results[id].timeout == 0)
 				{
 					fprintf(stderr, "Warning: Worker #%i timed out\n", id);
 				}
